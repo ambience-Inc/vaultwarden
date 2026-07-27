@@ -279,6 +279,16 @@ pub async fn send_single_org_removed_from_org(address: &str, org_name: &str) -> 
     send_email(address, &subject, body_html, body_text).await
 }
 
+fn required_organization_invite_parameters(has_existing_user: bool) -> [(&'static str, &'static str); 2] {
+    [
+        ("initOrganization", "false"),
+        (
+            "orgUserHasExistingUser",
+            if has_existing_user { "true" } else { "false" },
+        ),
+    ]
+}
+
 pub async fn send_invite(
     user: &User,
     org_id: OrganizationId,
@@ -308,17 +318,9 @@ pub async fn send_invite(
             query_params.append_pair("orgSsoIdentifier", &org_id);
         }
 
-        // The web vault requires both of these parameters to be present.
-        // If either is missing it rejects the invite client-side, before any
-        // request reaches the server, showing only "Unable to accept invitation".
-        query_params.append_pair("initOrganization", "false");
-
-        let org_user_has_existing_user = if user.private_key.is_some() {
-            "true"
-        } else {
-            "false"
-        };
-        query_params.append_pair("orgUserHasExistingUser", org_user_has_existing_user);
+        for (name, value) in required_organization_invite_parameters(user.private_key.is_some()) {
+            query_params.append_pair(name, value);
+        }
     }
 
     let Some(query_string) = query.query() else {
@@ -739,4 +741,27 @@ async fn send_email(address: &str, subject: &str, body_html: String, body_text: 
         .multipart(body)?;
 
     send_with_selected_transport(email).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::required_organization_invite_parameters;
+
+    #[test]
+    fn organization_invite_parameters_cover_new_and_existing_users() {
+        assert_eq!(
+            required_organization_invite_parameters(false),
+            [
+                ("initOrganization", "false"),
+                ("orgUserHasExistingUser", "false"),
+            ]
+        );
+        assert_eq!(
+            required_organization_invite_parameters(true),
+            [
+                ("initOrganization", "false"),
+                ("orgUserHasExistingUser", "true"),
+            ]
+        );
+    }
 }

@@ -1,0 +1,150 @@
+name: Build Ambience patched release
+
+on:
+  push:
+    tags:
+      - "ambience-*"
+
+permissions: {}
+
+concurrency:
+  group: ambience-patched-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: >-
+      github.repository == 'ambience-Inc/vaultwarden' &&
+      github.ref_type == 'tag'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      id-token: write
+      packages: write
+    env:
+      IMAGE_REPOSITORY: ghcr.io/ambience-inc/vaultwarden
+      PATCH_COMMIT: 91057acbdae64e12a7a11f6d570888faff70df7e
+      UPSTREAM_COMMIT: 46ae59eaf444f0ae0a799070cf2bd6c415284a51
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Validate immutable source lineage
+        id: release
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^ambience-1\.37\.0-p7482\.[1-9][0-9]*$ ]]; then
+            echo "Unexpected patched release tag: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          git merge-base --is-ancestor "$UPSTREAM_COMMIT" "$GITHUB_SHA"
+          git merge-base --is-ancestor "$PATCH_COMMIT" "$GITHUB_SHA"
+          image_tag="${GITHUB_REF_NAME#ambience-}"
+          echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Test the invite URL regression
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            --no-install-recommends \
+            build-essential \
+            libmariadb-dev-compat \
+            libpq-dev \
+            libssl-dev \
+            pkg-config
+          cargo fmt --all -- --check
+          cargo test --profile ci --features sqlite \
+            organization_invite_parameters_cover_new_and_existing_users
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3.12.0
+
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and publish the immutable image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6.19.2
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE_REPOSITORY }}:${{ steps.release.outputs.image_tag }}
+          build-args: |
+            VW_VERSION=${{ steps.release.outputs.image_tag }}
+          labels: |
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+            org.opencontainers.image.licenses=GPL-3.0-only
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=https://github.com/ambience-Inc/vaultwarden
+            org.opencontainers.image.version=${{ steps.release.outputs.image_tag }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=vaultwarden-amd64-debian
+          cache-to: type=gha,scope=vaultwarden-amd64-debian,mode=max
+
+      - uses: sigstore/cosign-installer@398d4b0eeef1380460a10c8013a76f728fb906ac # v3.9.1
+
+      - name: Sign and attest the immutable image
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          image="${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"
+          cosign sign --yes "$image"
+          .github/scripts/emit-ambience-slsa-provenance.sh \
+            "$RUNNER_TEMP/vaultwarden-provenance.json"
+          cosign attest --yes \
+            --predicate "$RUNNER_TEMP/vaultwarden-provenance.json" \
+            --type slsaprovenance \
+            "$image"
+
+      - name: Scan the immutable image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.IMAGE_REPOSITORY }}@${{ steps.build.outputs.digest }}
+          format: table
+          severity: CRITICAL,HIGH
+          ignore-unfixed: false
+          exit-code: 1
+
+      - name: Verify anonymous pull and provenance
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          image="${IMAGE_REPOSITORY}@${IMAGE_DIGEST}"
+          identity="https://github.com/${GITHUB_REPOSITORY}/.github/workflows/ambience-patched-release.yml@${GITHUB_REF}"
+          docker logout ghcr.io
+          docker pull "$image"
+          test "$(docker image inspect "$image" --format '{{.Architecture}}')" = amd64
+          test "$(
+            docker image inspect "$image" \
+              --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'
+          )" = "$GITHUB_SHA"
+          cosign verify \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$image"
+          cosign verify-attestation \
+            --type slsaprovenance \
+            --certificate-identity "$identity" \
+            --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+            "$image"
+
+      - name: Publish release coordinates
+        env:
+          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_TAG: ${{ steps.release.outputs.image_tag }}
+        run: |
+          {
+            echo "### Patched Vaultwarden image"
+            echo
+            echo "- Image: \`${IMAGE_REPOSITORY}:${IMAGE_TAG}@${IMAGE_DIGEST}\`"
+            echo "- Source: \`${GITHUB_REPOSITORY}@${GITHUB_SHA}\`"
+            echo "- Upstream base: \`${UPSTREAM_COMMIT}\`"
+            echo "- Upstream patch: \`${PATCH_COMMIT}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
