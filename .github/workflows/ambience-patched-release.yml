@@ -40,7 +40,19 @@ jobs:
             exit 1
           fi
           git merge-base --is-ancestor "$UPSTREAM_COMMIT" "$GITHUB_SHA"
-          git merge-base --is-ancestor "$PATCH_COMMIT" "$GITHUB_SHA"
+          git fetch --no-tags \
+            https://github.com/dani-garcia/vaultwarden.git \
+            refs/pull/7482/head
+          test "$(git rev-parse FETCH_HEAD)" = "$PATCH_COMMIT"
+          expected_patch_id="$(
+            git show --pretty=format: "$PATCH_COMMIT" |
+              git patch-id --stable |
+              cut -d ' ' -f 1
+          )"
+          git log --pretty=format: --patch "$UPSTREAM_COMMIT..$GITHUB_SHA" |
+            git patch-id --stable |
+            cut -d ' ' -f 1 |
+            grep -Fqx "$expected_patch_id"
           image_tag="${GITHUB_REF_NAME#ambience-}"
           echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
 
