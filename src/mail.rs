@@ -284,7 +284,11 @@ fn required_organization_invite_parameters(has_existing_user: bool) -> [(&'stati
         ("initOrganization", "false"),
         (
             "orgUserHasExistingUser",
-            if has_existing_user { "true" } else { "false" },
+            if has_existing_user {
+                "true"
+            } else {
+                "false"
+            },
         ),
     ]
 }
@@ -751,17 +755,11 @@ mod tests {
     fn organization_invite_parameters_cover_new_and_existing_users() {
         assert_eq!(
             required_organization_invite_parameters(false),
-            [
-                ("initOrganization", "false"),
-                ("orgUserHasExistingUser", "false"),
-            ]
+            [("initOrganization", "false"), ("orgUserHasExistingUser", "false"),]
         );
         assert_eq!(
             required_organization_invite_parameters(true),
-            [
-                ("initOrganization", "false"),
-                ("orgUserHasExistingUser", "true"),
-            ]
+            [("initOrganization", "false"), ("orgUserHasExistingUser", "true"),]
         );
     }
 }
